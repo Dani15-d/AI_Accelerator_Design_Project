@@ -20,7 +20,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from src.experiment import run_experiments
-from src.plot_results import generate_all_plots
+from src.plot_results import generate_all_plots, generate_project_report
 from src.winograd_conv import verify_winograd_vs_direct
 import numpy as np
 
@@ -52,9 +52,11 @@ if __name__ == "__main__":
     if "--plot-only" in args:
         print("\n[Re-generating plots from existing CSV …]")
         paths = generate_all_plots()
+        report = generate_project_report()
         print("\n[✓] Plots generated:")
         for name, path in paths.items():
             print(f"    {name}: {path}")
+        print(f"    project_report: {report}")
         sys.exit(0)
 
     # Default: full pipeline
@@ -63,14 +65,16 @@ if __name__ == "__main__":
     print("\n[1/2] Running experiments …")
     results = run_experiments(verbose=True)
 
-    print("\n[2/2] Generating plots …")
+    print("\n[2/2] Generating plots and presentation report …")
     plot_paths = generate_all_plots(rows=results)
+    report_path = generate_project_report(rows=results)
 
     print("\n" + "=" * 60)
     print("  Done!  Check the results/ directory for:")
     print("    • results.csv")
     for name, path in plot_paths.items():
         print(f"    • {os.path.basename(path)}")
+    print(f"    • {os.path.basename(report_path)}")
     print("=" * 60)
     print("\nTo explore interactively:")
     print("  jupyter notebook notebooks/analysis.ipynb")
