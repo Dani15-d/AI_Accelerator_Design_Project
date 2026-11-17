@@ -27,6 +27,7 @@ from .winograd_conv import (
     winograd_conv_2d_fp32,
     winograd_conv_2d_fp16,
     winograd_conv_2d_int8_simulated,
+    winograd_conv_2d_int8_vvid,
 )
 
 
@@ -167,6 +168,7 @@ def benchmark_convolution(
             "fp32": winograd_conv_2d_fp32,
             "fp16": winograd_conv_2d_fp16,
             "int8": winograd_conv_2d_int8_simulated,
+            "int8_vvid": winograd_conv_2d_int8_vvid,
         }
         for prec in precisions:
             if prec not in method_map_wino:

@@ -34,21 +34,23 @@ RESULTS_FILE = os.path.join(RESULTS_DIR, "results.csv")
 
 # Colour palette for the six method/precision combos
 COMBO_COLORS = {
-    "direct_fp32":    "#2196F3",   # blue
-    "direct_fp16":    "#64B5F6",   # light blue
-    "direct_int8":    "#0D47A1",   # dark blue
-    "winograd_fp32":  "#F44336",   # red
-    "winograd_fp16":  "#EF9A9A",   # light red
-    "winograd_int8":  "#B71C1C",   # dark red
+    "direct_fp32":      "#2196F3",   # blue
+    "direct_fp16":      "#64B5F6",   # light blue
+    "direct_int8":      "#0D47A1",   # dark blue
+    "winograd_fp32":    "#F44336",   # red
+    "winograd_fp16":    "#EF9A9A",   # light red
+    "winograd_int8_naive": "#B71C1C",   # dark red
+    "winograd_int8_vvid":   "#00C853",   # green for paper-stable scheme
 }
 
 COMBO_MARKERS = {
-    "direct_fp32":    "o",
-    "direct_fp16":    "s",
-    "direct_int8":    "^",
-    "winograd_fp32":  "D",
-    "winograd_fp16":  "P",
-    "winograd_int8":  "X",
+    "direct_fp32":      "o",
+    "direct_fp16":      "s",
+    "direct_int8":      "^",
+    "winograd_fp32":    "D",
+    "winograd_fp16":    "P",
+    "winograd_int8_naive": "X",
+    "winograd_int8_vvid":   "*",
 }
 
 

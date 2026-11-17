@@ -40,6 +40,7 @@ from .winograd_conv import (
     winograd_conv_2d_fp32,
     winograd_conv_2d_fp16,
     winograd_conv_2d_int8_simulated,
+    winograd_conv_2d_int8_vvid,
 )
 from .precision_utils import (
     compute_max_abs_error,
@@ -142,7 +143,8 @@ def run_experiments(
         ("direct",   "int8", direct_conv_2d_int8_simulated),
         ("winograd", "fp32", winograd_conv_2d_fp32),
         ("winograd", "fp16", winograd_conv_2d_fp16),
-        ("winograd", "int8", winograd_conv_2d_int8_simulated),
+        ("winograd", "int8_naive", winograd_conv_2d_int8_simulated),
+        ("winograd", "int8_vvid", winograd_conv_2d_int8_vvid),
     ]
 
     total = len(input_sizes) * len(methods)

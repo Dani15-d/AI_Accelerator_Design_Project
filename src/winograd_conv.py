@@ -51,6 +51,7 @@ from typing import Tuple
 
 from .precision_utils import (
     quantize_to_int8,
+    quantize_with_clip,
     dequantize_from_int8,
     simulate_fp16_rounding,
 )
@@ -402,6 +403,94 @@ def winograd_conv_2d_int8_simulated(
 
     # Run FP32 Winograd on the quantised (dequantised) values
     return winograd_conv_2d_fp32(inp_dq, ker_dq)
+
+
+def winograd_conv_2d_int8_vvid(
+    inp: np.ndarray,
+    kernel: np.ndarray,
+    scale_input: float = 0.0,
+    scale_kernel: float = 0.0,
+    clip_factor: float = 1.0,
+) -> np.ndarray:
+    """
+    Winograd INT8 simulation inspired by the Wino Vidi Vici paper.
+
+    The implementation explicitly models the paper's main numerical-stability
+    idea: intermediate Winograd transform values are clipped before each
+    quantisation stage to prevent overflow and to keep the transformed values
+    within the representable INT8 range.
+
+    Pipeline used here:
+      1. Transform the kernel and each 4×4 tile with G and B.
+      2. Clip each transformed tensor using stage-specific clipping factors.
+      3. Quantise the transformed kernel and data with INT8 rounding.
+      4. Dequantise back to float32.
+      5. Multiply element-wise in the transformed domain.
+      6. Clip the element-wise product before its own quantisation round-trip.
+      7. Apply the inverse transform to recover the output patch.
+
+    This is a lightweight, CPU-only approximation of the paper's stability
+    mechanism and is intended for numerical comparison against the naive
+    INT8 Winograd baseline.
+    """
+    inp = np.asarray(inp, dtype=np.float32)
+    kernel = np.asarray(kernel, dtype=np.float32)
+
+    if kernel.shape != (3, 3):
+        raise ValueError(f"Winograd F(2×2,3×3) requires a 3×3 kernel; got {kernel.shape}.")
+    if inp.ndim != 2:
+        raise ValueError(f"Input must be 2-D; got shape {inp.shape}.")
+    if inp.shape[0] < 4 or inp.shape[1] < 4:
+        raise ValueError(f"Input must be at least 4×4 for Winograd tiling; got {inp.shape}.")
+
+    H, W = inp.shape
+    out_h = H - 2
+    out_w = W - 2
+
+    G_f32 = G.astype(np.float32)
+    Gt_f32 = Gt.astype(np.float32)
+    B_f32 = B.astype(np.float32)
+    Bt_f32 = Bt.astype(np.float32)
+    A_f32 = A.astype(np.float32)
+    At_f32 = At.astype(np.float32)
+
+    # Global clipping bounds inferred from the kernel and input statistics.
+    if scale_input == 0.0:
+        max_inp = np.max(np.abs(inp))
+        scale_input = (127.0 / max_inp) if max_inp != 0.0 else 1.0
+    if scale_kernel == 0.0:
+        max_ker = np.max(np.abs(kernel))
+        scale_kernel = (127.0 / max_ker) if max_ker != 0.0 else 1.0
+
+    # Estimate a conservatively stable bound from the kernel transform.
+    kernel_transform = G_f32 @ kernel @ Gt_f32
+    kernel_clip = max(np.max(np.abs(kernel_transform)), 1e-6) * clip_factor
+
+    padded, n_th, n_tw = _tile_input(inp.astype(np.float32))
+    out_full = np.zeros((n_th * 2, n_tw * 2), dtype=np.float32)
+
+    for ti in range(n_th):
+        for tj in range(n_tw):
+            row, col = ti * 2, tj * 2
+            d = padded[row : row + 4, col : col + 4]
+            data_transform = B_f32 @ d @ Bt_f32
+            data_clip = max(np.max(np.abs(data_transform)), 1e-6) * clip_factor
+
+            # Stage 1: quantise the transformed filter and data with clipping.
+            U_q, scale_u, _ = quantize_with_clip(kernel_transform, kernel_clip)
+            V_q, scale_v, _ = quantize_with_clip(data_transform, data_clip)
+            U_dq = dequantize_from_int8(U_q, scale_u).astype(np.float32)
+            V_dq = dequantize_from_int8(V_q, scale_v).astype(np.float32)
+
+            M = U_dq * V_dq
+            m_clip = max(np.max(np.abs(M)), 1e-6) * clip_factor
+            M_q, scale_m, _ = quantize_with_clip(M, m_clip)
+            M_dq = dequantize_from_int8(M_q, scale_m).astype(np.float32)
+
+            Y = At_f32 @ M_dq @ A_f32
+            out_full[ti * 2 : ti * 2 + 2, tj * 2 : tj * 2 + 2] = Y
+
+    return out_full[:out_h, :out_w].astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

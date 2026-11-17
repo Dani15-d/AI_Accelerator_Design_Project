@@ -71,6 +71,51 @@ def dequantize_from_int8(arr: np.ndarray, scale: float) -> np.ndarray:
     return (arr / scale).astype(np.float32)
 
 
+def quantize_with_clip(
+    arr: np.ndarray,
+    clip_value: float,
+    bits: int = 8,
+    signed: bool = True,
+    eps: float = 1e-8,
+) -> tuple[np.ndarray, float, np.ndarray]:
+    """
+    Quantise a tensor with an explicit clipping bound.
+
+    This models the key Wino Vidi Vici idea: clip the tensor before
+    quantisation so the transformed values stay within the representable
+    INT8 range while reducing overflow-driven instability in Winograd
+    intermediate products.
+
+    Parameters
+    ----------
+    arr        : float ndarray
+    clip_value : maximum magnitude allowed before quantisation
+    bits       : quantisation width (default 8)
+    signed     : whether to use signed integer encoding
+    eps        : numerical stabiliser to avoid divide-by-zero
+
+    Returns
+    -------
+    q      : integer tensor in the target range
+    scale  : dequantisation scale used for this stage
+    clipped: arr after clipping to [-clip_value, clip_value]
+    """
+    arr = np.asarray(arr, dtype=np.float32)
+    clip_value = float(abs(clip_value))
+    if clip_value < eps:
+        clip_value = float(eps)
+
+    clipped = np.clip(arr, -clip_value, clip_value)
+    max_q = (2 ** (bits - 1)) - 1 if signed else 2 ** bits - 1
+    scale = max_q / clip_value
+    q = np.rint(clipped * scale)
+    if signed:
+        q = np.clip(q, -max_q, max_q)
+    else:
+        q = np.clip(q, 0, max_q)
+    return q.astype(np.int32), float(scale), clipped.astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # FP16 rounding simulation
 # ---------------------------------------------------------------------------

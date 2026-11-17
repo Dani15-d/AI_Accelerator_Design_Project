@@ -73,6 +73,9 @@ A = [[1,  0],
 2. **Numerical sensitivity** — FP16/INT8 quantisation errors are amplified by the transform matrices.
 3. **Hardware dependence** — actual speedup depends on whether hardware has efficient GEMM/element-wise primitives for the transformed domain.
 
+### Paper-inspired stability mode: Wino Vidi Vici
+This project now includes a Winograd-INT8 path that explicitly models the key idea from the Wino Vidi Vici paper: clip the transformed intermediate values before each INT8 quantisation stage so the 8-bit representation does not overflow in the transformed domain. The naive INT8 Winograd baseline uses a one-shot quantisation of the input and kernel, while the new `winograd_int8_vvid` variant adds stage-wise clipping and re-quantisation of the transformed filter, activation tile, and element-wise product.
+
 ---
 
 ## Results Interpretation Guide
@@ -81,7 +84,7 @@ After running `python main.py`, the `results/` directory will contain:
 
 | File | Description |
 |------|-------------|
-| `results.csv` | Raw data: errors + timings for each (size, method, precision) combo |
+| `results.csv` | Raw data: errors + timings for each (size, method, precision) combo, including the paper-style `winograd_int8_vvid` benchmark |
 | `error_vs_method.png` | Bar chart of max absolute error (log scale) at a fixed input size |
 | `mse_vs_method.png` | Bar chart of MSE (log scale) at a fixed input size |
 | `runtime_vs_inputsize.png` | Line chart of mean runtime vs spatial size |
@@ -127,9 +130,10 @@ python main.py
 
 This will:
 1. Run a correctness check (Winograd FP32 vs Direct FP32).
-2. Benchmark all 6 method/precision combos at input sizes 8, 16, 32, 64, 128.
-3. Save `results/results.csv`.
-4. Generate and save all 4 plots to `results/`.
+2. Benchmark the direct and Winograd baselines at input sizes 8, 16, 32, 64, 128.
+3. Include both the naive INT8 Winograd baseline and the clipping-aware `int8_vvid` variant inspired by Wino Vidi Vici.
+4. Save `results/results.csv`.
+5. Generate and save all 4 plots to `results/`.
 
 ### Verify correctness only
 
