@@ -557,7 +557,10 @@ def generate_project_report(
                 if row.get("worthwhile_at_budget") not in (None, ""):
                     row["worthwhile_at_budget"] = row["worthwhile_at_budget"].lower() == "true"
 
-    winograd_rows = [row for row in rows if row["method"] == "winograd"]
+    winograd_rows = [
+        row for row in rows
+        if row["method"] == "winograd" and row["layer"] != "numpy-single-channel-check"
+    ]
     error_budget = (
         float(winograd_rows[0].get("error_budget", ERROR_BUDGET))
         if winograd_rows else ERROR_BUDGET
@@ -568,25 +571,107 @@ def generate_project_report(
         or row.get("worthwhile_at_budget") is True
     ]
     metadata = next((row for row in rows if row.get("device")), {})
+    precision_stats = []
+    for precision in PRECISIONS:
+        group = [row for row in winograd_rows if row["precision"] == precision]
+        if not group:
+            continue
+        best = max(group, key=lambda row: float(row.get("speedup_vs_precision_baseline", 0) or 0))
+        precision_stats.append({
+            "precision": precision,
+            "group": group,
+            "best": best,
+            "faster": sum(float(row.get("speedup_vs_precision_baseline", 0) or 0) > 1 for row in group),
+            "accurate": sum(
+                float(row["max_abs_error"]) <= float(row.get("error_budget", error_budget))
+                for row in group
+            ),
+            "worthwhile": sum(
+                str(row.get("worthwhile_at_budget", "")).lower() == "true"
+                or row.get("worthwhile_at_budget") is True
+                for row in group
+            ),
+            "mean_speedup": statistics.mean(
+                float(row.get("speedup_vs_precision_baseline", 0) or 0) for row in group
+            ),
+            "mean_normalized_rms": statistics.mean(float(row["normalized_rmse"]) for row in group),
+            "mean_mse": statistics.mean(float(row["mse"]) for row in group),
+            "worst_error": max(float(row["max_abs_error"]) for row in group),
+            "mean_latency": statistics.mean(float(row["mean_ms"]) for row in group),
+        })
+    sample = next(
+        (
+            row for row in winograd_rows
+            if row["layer"] == "stage1"
+            and int(row["batch"]) == 1
+            and row["precision"] == "fp32"
+        ),
+        winograd_rows[0] if winograd_rows else None,
+    )
+    matching_baseline = next(
+        (
+            row for row in rows
+            if sample
+            and row["method"] == "cudnn"
+            and row["layer"] == sample["layer"]
+            and int(row["batch"]) == int(sample["batch"])
+            and row["precision"] == sample["precision"]
+        ),
+        None,
+    )
+    max_speedup_row = max(
+        winograd_rows,
+        key=lambda row: float(row.get("speedup_vs_precision_baseline", 0) or 0),
+        default=None,
+    )
+    total_faster = sum(
+        float(row.get("speedup_vs_precision_baseline", 0) or 0) > 1
+        for row in winograd_rows
+    )
+    total_accurate = sum(
+        float(row["max_abs_error"]) <= float(row.get("error_budget", error_budget))
+        for row in winograd_rows
+    )
+    input_sizes = sorted({int(row["height"]) for row in winograd_rows})
+    batch_sizes = sorted({int(row["batch"]) for row in winograd_rows})
+
     lines = [
-        "# Winograd reduced-precision study: measured results",
+        "# Winograd reduced-precision study",
         "",
-        "## Research question and decision rule",
+        "## Executive summary",
         "",
-        f"This study tests when F(2x2,3x3) Winograd improves execution time without exceeding an explicit max-absolute-error budget. A configuration is called worthwhile only if it is faster than its matching PyTorch/cuDNN precision baseline **and** its max absolute error against the FP64 oracle is at or below {error_budget:g}. Runtime is not used as a power or energy proxy.",
+        f"**Result: {len(winners)} of {len(winograd_rows)} Winograd configurations met both requirements.** "
+        f"{total_faster}/{len(winograd_rows)} were faster than the matching PyTorch/cuDNN precision baseline, "
+        f"while {total_accurate}/{len(winograd_rows)} met the max-absolute-error budget of {error_budget:g}. "
+        "Figures are embedded below; runtime is not treated as a power or energy proxy.",
         "",
-        "## Experimental method",
+        "## 1. Question and decision rule",
+        "",
+        "The question is whether F(2x2,3x3) Winograd convolution can reduce end-to-end execution time "
+        "without exceeding an explicit numerical-error budget. A configuration is worthwhile only when "
+        "both conditions hold:",
+        "",
+        "1. `speedup = matching-baseline latency / Winograd latency > 1.0`.",
+        f"2. `maximum absolute error <= {error_budget:g}` against the FP64 convolution oracle.",
+        "",
+        "**Conclusion:** multiplication-count savings alone are not a performance result. The benchmark "
+        "includes transforms, padding, allocations, and matrix multiplications.",
+        "",
+        "## 2. Experimental setup",
         "",
         "- Vectorized PyTorch NCHW Winograd: filter transform, vectorized input tiles, 16 batched channel-reduction GEMMs, inverse transform, and output crop; zero padding is supported.",
         "- Baselines: PyTorch `conv2d` (cuDNN on CUDA) in FP32, FP16, BF16, and input-quantized FP32; NumPy direct cross-correlation is measured separately for a single-channel sanity case.",
         "- Ground truth: PyTorch convolution with FP64 input and weights on CPU. Reported relative error is mean elementwise absolute error divided by `|reference| + 1e-8`; normalized RMS is RMS error divided by reference RMS.",
         "- INT8 Winograd quantizes transformed U and V independently per Winograd coordinate, accumulates the channel reduction in int32, and dequantizes for the inverse transform. `stagewise_int8` additionally requantizes the transformed product. `input_int8` is only a quantize-before-transform comparator, not an integer Winograd implementation.",
         "- Quantization scales are dynamically calibrated from each input/weight batch (max-absolute by transform coordinate unless an explicit percentile is supplied to the API); this is not learned clipping or a reproduction of Wino Vidi Vici training.",
-        "- Layer shapes are representative ResNet-18 3x3 stage convolutions at batches 1, 8, and 32. Reported latency covers the complete PyTorch function, including transforms, padding, allocations and GEMMs; CUDA events time GPU execution. Each cell records repeat count and latency spread.",
+        f"- Coverage: {len(input_sizes)} spatial sizes ({', '.join(f'{size}x{size}' for size in input_sizes)}), "
+        f"batch sizes {', '.join(map(str, batch_sizes))}, {len(precision_stats)} Winograd precision modes, "
+        f"and {len(winograd_rows)} Winograd configurations.",
+        "- Layer shapes are representative ResNet-18 3x3 stage convolutions. Reported latency covers the complete PyTorch function; CUDA events time GPU execution. Each cell records repeat count and latency spread.",
         "- Inputs and filters use seeded standard-normal values; accuracy results are synthetic layerwise measurements, not real ResNet activations.",
         "- Operation counts use the slide's per-2x2-tile arithmetic convention (direct: 36 multiplies and 32 additions; Winograd: 16 multiplies and 56 additions), excluding transform and filter-preparation work. Direct counts use the exact cropped output area; Winograd counts include partially cropped edge tiles. Counts are not latency predictions.",
         "",
-        "## Run metadata",
+        "## 3. Run metadata",
         "",
         f"- Device: {metadata.get('device', 'not recorded')}",
         f"- NVIDIA driver: {metadata.get('driver', 'not recorded')}",
@@ -594,78 +679,153 @@ def generate_project_report(
         f"- GPU clock / temperature / board-power sample before the sweep: {metadata.get('sm_clock_mhz', '')} / {metadata.get('memory_clock_mhz', '')} MHz; {metadata.get('temperature_c', '')} C; {metadata.get('power_w', '')} W",
         "- Telemetry is a single pre-sweep `nvidia-smi` sample (not synchronized with timed kernels or integrated energy); no energy claim is made.",
         "",
-        "## Results",
+        "## 4. Numerical results and calculations",
         "",
-        "See `crossover_speedup.png` for speedup by layer/batch/precision, `accuracy_runtime_tradeoff.png` for normalized-RMS error versus latency, and `error_vs_method.png`, `mse_vs_method.png`, and `runtime_vs_inputsize.png` for the precision and spatial-size views.",
+        "### Step 1 — Operation-count change",
         "",
+        "For one 2x2 output tile, direct convolution uses 36 multiplies and 32 additions; Winograd "
+        "uses 16 multiplies and 56 additions. This is `(36 - 16) / 36 = 55.6%` fewer multiplications "
+        "and `(56 - 32) / 32 = 75.0%` more additions, before accounting for transforms and data movement.",
     ]
-    if winners:
+    if sample:
+        winograd_multiplies = float(
+            sample.get("winograd_hadamard_multiplies", sample["multiplies_per_layer"])
+        )
+        winograd_adds = float(sample["adds_per_layer"])
+        direct_multiplies = float(sample["multiplies_per_layer"])
+        direct_adds = float(sample["adds_per_layer"])
+        if matching_baseline:
+            direct_multiplies = float(matching_baseline["multiplies_per_layer"])
+            direct_adds = float(matching_baseline["adds_per_layer"])
         lines += [
-            f"- **{len(winners)} of {len(winograd_rows)} Winograd configurations** meet both the {error_budget:g} max-error budget and the matching-precision speedup criterion.",
             "",
-            "| Layer | Batch | Precision | Speedup vs baseline | Max abs. error | Normalized RMS | Latency (ms) |",
-            "|---|---:|---|---:|---:|---:|---:|",
+            f"For `{sample['layer']}`, batch {int(sample['batch'])}, FP32, the CSV records "
+            f"{direct_multiplies:,.0f} direct multiplies versus {winograd_multiplies:,.0f} Winograd "
+            f"Hadamard multiplies ({(1 - winograd_multiplies / direct_multiplies) * 100:.1f}% fewer), "
+            f"and {direct_adds:,.0f} direct additions versus {winograd_adds:,.0f} Winograd additions "
+            f"({(winograd_adds / direct_adds - 1) * 100:+.1f}%).",
+            "",
+            "**Conclusion:** fewer counted multiplications did not by itself establish a latency win.",
         ]
-        for row in winners:
-            lines.append(
-                f"| {row['layer']} | {row['batch']} | {row['precision']} | "
-                f"{float(row['speedup_vs_precision_baseline']):.3f}x | "
-                f"{float(row['max_abs_error']):.4e} | {float(row['normalized_rmse']):.4e} | "
-                f"{float(row['mean_ms']):.4f} |"
-            )
-    else:
+    if sample and matching_baseline:
+        baseline_ms = float(matching_baseline["mean_ms"])
+        winograd_ms = float(sample["mean_ms"])
+        speedup = float(sample["speedup_vs_precision_baseline"])
         lines += [
-            f"- **No Winograd configuration** met both criteria in this measured sweep ({len(winograd_rows)} tested).",
-            "- Do not claim a speedup from the multiplication-count reduction alone: transform and launch overhead are part of the end-to-end measurement.",
+            "",
+            "### Step 2 — End-to-end latency",
+            "",
+            "`speedup = baseline latency / Winograd latency`. For the same representative case: "
+            f"`{baseline_ms:.4f} ms / {winograd_ms:.4f} ms = {speedup:.4f}x`, "
+            f"or about `{1 / speedup:.1f}x` slower end to end.",
+            "",
+            f"The best measured speedup was {float(max_speedup_row['speedup_vs_precision_baseline']):.3f}x "
+            f"({max_speedup_row['layer']}, batch {int(max_speedup_row['batch'])}, "
+            f"{max_speedup_row['precision']}).",
+            "",
+            "**Conclusion:** none of the tested configurations reduced measured latency.",
         ]
     lines += [
         "",
-        "### Per-precision aggregate",
+        "### Step 3 — Accuracy and precision aggregates",
         "",
-        "| Precision | N | Mean speedup | Best speedup (layer, batch) | Faster | Within budget | Worthwhile | Mean normalized RMS | Worst max error |",
-        "|---|---:|---:|---|---:|---:|---:|---:|---:|",
+        f"Maximum absolute error must be at most {error_budget:g}. `Faster`, `within budget`, and "
+        "`worthwhile` are counts out of `N` for each precision.",
+        "",
+        "| Precision | N | Mean speedup | Best speedup (layer, batch) | Faster | Within budget | Worthwhile | Mean normalized RMS | Mean MSE | Worst max error | Mean latency (ms) |",
+        "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for precision in PRECISIONS:
-        group = [row for row in winograd_rows if row["precision"] == precision]
-        if not group:
-            continue
-        faster = sum(float(row.get("speedup_vs_precision_baseline", 0) or 0) > 1 for row in group)
-        accurate = sum(float(row["max_abs_error"]) <= float(row["error_budget"]) for row in group)
-        worthwhile = sum(
-            str(row.get("worthwhile_at_budget", "")).lower() == "true"
-            or row.get("worthwhile_at_budget") is True
-            for row in group
-        )
-        best = max(group, key=lambda row: float(row.get("speedup_vs_precision_baseline", 0) or 0))
-        mean_speedup = statistics.mean(
-            float(row.get("speedup_vs_precision_baseline", 0) or 0) for row in group
-        )
-        mean_normalized_rms = statistics.mean(float(row["normalized_rmse"]) for row in group)
-        worst_error = max(float(row["max_abs_error"]) for row in group)
+    for stat in precision_stats:
+        best = stat["best"]
         lines.append(
-            f"| {precision} | {len(group)} | {mean_speedup:.3f}x | "
+            f"| {stat['precision']} | {len(stat['group'])} | {stat['mean_speedup']:.3f}x | "
             f"{float(best['speedup_vs_precision_baseline']):.3f}x "
-            f"({best['layer']}, N={best['batch']}) | {faster} | {accurate} | "
-            f"{worthwhile} | {mean_normalized_rms:.3e} | {worst_error:.3e} |"
+            f"({best['layer']}, N={int(best['batch'])}) | {stat['faster']} | "
+            f"{stat['accurate']} | {stat['worthwhile']} | {stat['mean_normalized_rms']:.3e} | "
+            f"{stat['mean_mse']:.3e} | {stat['worst_error']:.3e} | {stat['mean_latency']:.3f} |"
         )
     lines += [
         "",
-        "For this measured implementation and sweep, the answer is **none of the tested reduced-precision Winograd configurations**: all 72 were slower than the selected PyTorch/cuDNN comparison and none met both parts of the decision rule. The 16-product Winograd arithmetic count is therefore not sufficient to predict a win; this unfused transform/GEMM/transform implementation pays substantial launch, layout, and transform overhead. A fused CUDA/Triton kernel and calibrated representative activations are the next experiments before making a hardware-level claim.",
-    ]
-    lines += [
+        "**Conclusion:** FP32 met the error budget in all its cases but never ran faster. FP16 passed "
+        "the error screen in only "
+        f"{next((stat['accurate'] for stat in precision_stats if stat['precision'] == 'fp16'), 0)}/"
+        f"{next((len(stat['group']) for stat in precision_stats if stat['precision'] == 'fp16'), 0)} "
+        "cases; BF16 and the INT8 variants passed in none.",
         "",
-        "## Interpretation and limitations",
+        "### Step 4 — Apply both decision conditions",
         "",
-        "- The crossover is hardware-, shape-, batch-, and precision-dependent. Consult `crossover_speedup.png` and the row-level CSV rather than extrapolating one aggregate speedup.",
-        f"- Pre-sweep GPU clocks were {metadata.get('sm_clock_mhz', '')}/{metadata.get('memory_clock_mhz', '')} MHz; clocks were not sampled during timed kernels, so absolute latencies are specific to this dynamic-clock laptop session and should be repeated under a documented plugged-in performance-mode setup.",
-        "- FP16/BF16 operations are performed in the requested PyTorch tensor dtype. The INT8 paths are quantization simulations with integer transformed-domain channel accumulation; they do not establish the performance of a dedicated INT8 accelerator kernel.",
-        f"- A max-error budget is application-specific. This report uses {error_budget:g} as a numerical screening threshold, not a validated CNN-accuracy or task-quality limit.",
+        f"- Faster than matching baseline: **{total_faster}/{len(winograd_rows)}**.",
+        f"- At or below the max-error budget: **{total_accurate}/{len(winograd_rows)}**.",
+        f"- Passing both conditions: **{len(winners)}/{len(winograd_rows)}**.",
+        "",
+        "**Conclusion:** no tested configuration is eligible under the stated rule.",
+        "",
+        "## 5. Result figures",
+        "",
+        "### Speedup by layer, batch, and precision",
+        "",
+        "Each heatmap cell is Winograd speedup over the matching baseline. Values above 1.0x would be faster; "
+        f"the maximum observed value is {float(max_speedup_row['speedup_vs_precision_baseline']):.3f}x.",
+        "",
+        "![Winograd speedup crossover by layer, batch, and precision](crossover_speedup.png)",
+        "",
+        "**Conclusion:** no measured crossover exceeds 1.0x.",
+        "",
+        "### Accuracy versus runtime",
+        "",
+        "Lower error and lower latency are preferable. FP32 has mean normalized RMS error "
+        f"{next((stat['mean_normalized_rms'] for stat in precision_stats if stat['precision'] == 'fp32'), float('nan')):.3e}, "
+        "but remains slower than its baseline; the INT8 variants have greater numerical error and no speed win.",
+        "",
+        "![Winograd normalized-RMS accuracy versus runtime](accuracy_runtime_tradeoff.png)",
+        "",
+        "**Conclusion:** no tested precision offers both the required accuracy and an end-to-end speed improvement.",
+        "",
+        "### Maximum absolute error by method and precision",
+        "",
+        "The dashed horizontal line marks the max-error budget; boxplots summarize measured shapes and methods.",
+        "",
+        "![Maximum absolute error by method and precision](error_vs_method.png)",
+        "",
+        "**Conclusion:** judge each precision against the numeric threshold; reduced precision is not automatically acceptable.",
+        "",
+        "### Mean squared error by method and precision",
+        "",
+        "MSE complements maximum error by summarizing squared deviations across outputs.",
+        "",
+        "![Mean squared error by method and precision](mse_vs_method.png)",
+        "",
+        "**Conclusion:** MSE and maximum error reveal different aspects of error; the pass/fail rule here uses maximum error.",
+        "",
+        "### FP32 latency versus spatial size",
+        "",
+        "The plot compares cuDNN and Winograd across measured layer sizes and batches; Winograd latency includes its transforms.",
+        "",
+        "![FP32 runtime versus input spatial size and batch](runtime_vs_inputsize.png)",
+        "",
+        "**Conclusion:** results should not be extrapolated beyond the tested shapes, batches, and device.",
+        "",
+        "## 6. Overall conclusion",
+        "",
+        f"**{len(winners)} of {len(winograd_rows)} configurations met both criteria.** The 55.6% "
+        "theoretical reduction in tile-level multiplications did not translate into an end-to-end speedup "
+        "for this unfused implementation. A fused CUDA/Triton kernel and calibrated representative "
+        "activations are reasonable next experiments before making a hardware-level claim.",
+        "",
+        "## 7. Limitations",
+        "",
+        "- The crossover is hardware-, shape-, batch-, and precision-dependent; these timings are specific to this run.",
+        f"- Pre-sweep GPU clocks were {metadata.get('sm_clock_mhz', '')}/{metadata.get('memory_clock_mhz', '')} MHz; clocks were not sampled during timed kernels.",
+        "- FP16/BF16 run in the requested PyTorch tensor dtype. INT8 paths are quantization simulations, not dedicated accelerator kernels.",
+        f"- The {error_budget:g} max-error budget is a numerical screening threshold, not a validated CNN-accuracy or task-quality limit.",
         "- No CNN was trained or evaluated; no top-1 accuracy, ResNet end-to-end inference, or model-level quality claim is supported.",
-        "- Winograd transform additions and filter-transform amortization are omitted from the simple operation-count columns. The benchmark includes their runtime cost.",
+        "- Winograd transform additions and filter-transform amortization are omitted from operation counts, but their runtime cost is included.",
         "",
         "## Reproducibility",
         "",
-        "Run `python main.py --runs 100 --repeats 5` to regenerate the complete benchmark and report, or `python main.py --plot-only` to rebuild plots and this report from the saved CSV. Fixed seeds are recorded per row. Use a plugged-in performance-mode laptop and repeat after cooling for publication-quality comparisons.",
+        "Run `python main.py --runs 100 --repeats 5` to regenerate the complete benchmark and report, or "
+        "`python main.py --plot-only` to rebuild plots and this report from the saved CSV. Fixed seeds are "
+        "recorded per row. Use a plugged-in performance-mode laptop and repeat after cooling for publication-quality comparisons.",
         "",
         "## References",
         "",
