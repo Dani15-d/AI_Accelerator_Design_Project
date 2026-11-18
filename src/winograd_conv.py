@@ -405,36 +405,31 @@ def winograd_conv_2d_int8_simulated(
     return winograd_conv_2d_fp32(inp_dq, ker_dq)
 
 
-def winograd_conv_2d_int8_vvid(
+def winograd_conv_2d_int8_stagewise(
     inp: np.ndarray,
     kernel: np.ndarray,
-    scale_input: float = 0.0,
-    scale_kernel: float = 0.0,
     clip_factor: float = 1.0,
 ) -> np.ndarray:
     """
-    Winograd INT8 simulation inspired by the Wino Vidi Vici paper.
-
-    The implementation explicitly models the paper's main numerical-stability
-    idea: intermediate Winograd transform values are clipped before each
-    quantisation stage to prevent overflow and to keep the transformed values
-    within the representable INT8 range.
+    Simulate stage-wise transform-domain INT8 requantization.
 
     Pipeline used here:
       1. Transform the kernel and each 4×4 tile with G and B.
-      2. Clip each transformed tensor using stage-specific clipping factors.
+      2. Clip each transformed tensor using a max-derived, per-tile bound.
       3. Quantise the transformed kernel and data with INT8 rounding.
       4. Dequantise back to float32.
       5. Multiply element-wise in the transformed domain.
       6. Clip the element-wise product before its own quantisation round-trip.
       7. Apply the inverse transform to recover the output patch.
 
-    This is a lightweight, CPU-only approximation of the paper's stability
-    mechanism and is intended for numerical comparison against the naive
-    INT8 Winograd baseline.
+    This heuristic is inspired by transform-domain stability work but does
+    not reproduce learned clipping, calibration, or quantization-aware
+    training from Wino Vidi Vici.
     """
     inp = np.asarray(inp, dtype=np.float32)
     kernel = np.asarray(kernel, dtype=np.float32)
+    if clip_factor <= 0.0:
+        raise ValueError("clip_factor must be positive")
 
     if kernel.shape != (3, 3):
         raise ValueError(f"Winograd F(2×2,3×3) requires a 3×3 kernel; got {kernel.shape}.")
@@ -454,15 +449,6 @@ def winograd_conv_2d_int8_vvid(
     A_f32 = A.astype(np.float32)
     At_f32 = At.astype(np.float32)
 
-    # Global clipping bounds inferred from the kernel and input statistics.
-    if scale_input == 0.0:
-        max_inp = np.max(np.abs(inp))
-        scale_input = (127.0 / max_inp) if max_inp != 0.0 else 1.0
-    if scale_kernel == 0.0:
-        max_ker = np.max(np.abs(kernel))
-        scale_kernel = (127.0 / max_ker) if max_ker != 0.0 else 1.0
-
-    # Estimate a conservatively stable bound from the kernel transform.
     kernel_transform = G_f32 @ kernel @ Gt_f32
     kernel_clip = max(np.max(np.abs(kernel_transform)), 1e-6) * clip_factor
 

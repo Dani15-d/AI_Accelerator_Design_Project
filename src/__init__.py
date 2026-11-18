@@ -41,6 +41,8 @@ from .precision_utils import (
 from .benchmark import time_function, benchmark_convolution, print_benchmark_table
 from .experiment import run_experiments
 from .plot_results import generate_all_plots, load_results
+from .torch_winograd import torch_conv2d_precision, winograd_conv2d
+from .torch_experiment import run_torch_experiments
 
 __all__ = [
     # direct_conv
@@ -69,6 +71,9 @@ __all__ = [
     "print_benchmark_table",
     # experiment
     "run_experiments",
+    "winograd_conv2d",
+    "torch_conv2d_precision",
+    "run_torch_experiments",
     # plot_results
     "generate_all_plots",
     "load_results",

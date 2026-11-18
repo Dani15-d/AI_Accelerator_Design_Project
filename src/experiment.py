@@ -1,20 +1,20 @@
 """
 experiment.py
 =============
-Main experiment runner for the Winograd Reduced-Precision study.
+Legacy single-channel NumPy experiment runner.
 
 Workflow
 --------
 1. For each input size in [8, 16, 32, 64, 128]:
    a. Generate a random input and 3×3 kernel (fixed seed for reproducibility).
    b. Compute the FP32 direct convolution as the numerical ground truth.
-   c. Run all six method/precision combinations:
+   c. Run the legacy single-channel precision variants:
         direct_fp32, direct_fp16, direct_int8,
-        winograd_fp32, winograd_fp16, winograd_int8
+        winograd_fp32, winograd_fp16, winograd_int8, int8_stagewise
    d. Compute numerical errors vs. the ground truth.
    e. Measure runtime.
 2. Collect all results in a list of dicts → pandas DataFrame (or plain CSV).
-3. Save to results/results.csv.
+3. Save to results/legacy_numpy_results.csv.
 4. Print a formatted summary table.
 
 Authors : Jaswanth Palla (CS23B034), Danish (CS23B047)
@@ -40,7 +40,7 @@ from .winograd_conv import (
     winograd_conv_2d_fp32,
     winograd_conv_2d_fp16,
     winograd_conv_2d_int8_simulated,
-    winograd_conv_2d_int8_vvid,
+    winograd_conv_2d_int8_stagewise,
 )
 from .precision_utils import (
     compute_max_abs_error,
@@ -59,7 +59,7 @@ N_RUNS       = 30     # timing iterations per combination
 WARMUP_RUNS  = 5
 RANDOM_SEED  = 42
 RESULTS_DIR  = os.path.join(os.path.dirname(__file__), "..", "results")
-RESULTS_FILE = os.path.join(RESULTS_DIR, "results.csv")
+RESULTS_FILE = os.path.join(RESULTS_DIR, "legacy_numpy_results.csv")
 
 CSV_FIELDNAMES = [
     "input_size",
@@ -111,7 +111,7 @@ def run_experiments(
     input_sizes : list of int — spatial sizes (H=W) to sweep (default INPUT_SIZES)
     n_runs      : int — timing iterations per combination (default 30)
     seed        : int — random seed (default 42)
-    save_csv    : bool — write results to results/results.csv (default True)
+    save_csv    : bool — write results to results/legacy_numpy_results.csv (default True)
     verbose     : bool — print progress and summary table (default True)
 
     Returns
@@ -144,7 +144,7 @@ def run_experiments(
         ("winograd", "fp32", winograd_conv_2d_fp32),
         ("winograd", "fp16", winograd_conv_2d_fp16),
         ("winograd", "int8_naive", winograd_conv_2d_int8_simulated),
-        ("winograd", "int8_vvid", winograd_conv_2d_int8_vvid),
+        ("winograd", "int8_stagewise", winograd_conv_2d_int8_stagewise),
     ]
 
     total = len(input_sizes) * len(methods)

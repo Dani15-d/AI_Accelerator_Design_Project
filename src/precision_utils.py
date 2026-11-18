@@ -81,10 +81,9 @@ def quantize_with_clip(
     """
     Quantise a tensor with an explicit clipping bound.
 
-    This models the key Wino Vidi Vici idea: clip the tensor before
-    quantisation so the transformed values stay within the representable
-    INT8 range while reducing overflow-driven instability in Winograd
-    intermediate products.
+    This is a generic clipped-quantization helper for stage-wise Winograd
+    experiments. It does not implement learned clipping or quantization-aware
+    training from Wino Vidi Vici.
 
     Parameters
     ----------

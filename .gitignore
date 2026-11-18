@@ -37,6 +37,9 @@ venv.bak/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints
 
+# Test artifacts
+.pytest_cache/
+
 # IDEs
 .vscode/
 .idea/
